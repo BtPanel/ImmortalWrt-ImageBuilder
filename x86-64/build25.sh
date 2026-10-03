@@ -48,6 +48,21 @@ else
   if ! ls *.apk >/dev/null 2>&1; then
       echo "⚠️ packages/ 下没有 apk，跳过索引生成"
   else
+      # 0. 规范文件名：mkndx 按 ${name}-${version}.apk 记录包在仓库里的位置，
+      #    第三方 apk 常带 _x86_64 / _all 后缀、或把版本里的 ~ 写成 .，
+      #    会导致 make 阶段报 "package mentioned in index not found"。
+      #    这里从每个 apk 的 .PKGINFO 读出真实 name/version 后重命名。
+      echo "📝 按 PKGINFO 规范化 apk 文件名..."
+      for f in *.apk; do
+          INFO="$(tar -xOf "$f" .PKGINFO 2>/dev/null)"
+          PNAME="$(printf '%s\n' "$INFO" | sed -n 's/^pkgname = //p' | head -1)"
+          PVER="$(printf '%s\n' "$INFO" | sed -n 's/^pkgver = //p' | head -1)"
+          if [ -n "$PNAME" ] && [ -n "$PVER" ] && [ "$f" != "$PNAME-$PVER.apk" ]; then
+              echo "   $f -> $PNAME-$PVER.apk"
+              mv -f "$f" "$PNAME-$PVER.apk"
+          fi
+      done
+
       # 1. 定位工具链里的 apk / openssl（它们不在系统 PATH 中）
       APK_BIN="$IB_HOME/staging_dir/host/bin/apk"
       [ -x "$APK_BIN" ] || APK_BIN="$(command -v apk 2>/dev/null)"
