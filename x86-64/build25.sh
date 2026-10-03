@@ -37,8 +37,29 @@ else
   # 解压并拷贝apk到packages目录
   sh shell/apk-prepare-packages.sh
   ls -lah /home/build/immortalwrt/packages/
-fi
 
+  # ============= 🔴 针对 25.12 apk 包管理器修复包索引 =============
+  echo "🔄 正在为 25.12 apk 本地仓库构建索引数据库..."
+  cd /home/build/immortalwrt/packages/
+  
+  # 1. 使用系统内置的 apk 工具扫描目录下的所有 apk，生成 packages.adb 二进制数据库文件
+  apk index -o packages.adb *.apk
+  
+  # 2. 对包索引进行数字签名（25.12 安全策略强制要求本地库必须具备合法签名才能读取）
+  if [ -f ../key-build ]; then
+      echo "✍️ 正在使用本地密钥为 packages.adb 签名..."
+      # 25.12 默认使用 key-build 密钥和 apk-sign 工具进行本地仓库链条签名
+      ../staging_dir/host/bin/apk-sign --key ../key-build --output packages.adb.signed packages.adb
+      # 将签名后的文件覆盖回 packages.adb
+      mv packages.adb.signed packages.adb
+  else
+      echo "⚠️ 警告：未在根目录找到本地签名私钥 key-build，可能会影响打包！"
+  fi
+  # 返回源码根目录，确保不影响后续的 make 流程
+  cd /home/build/immortalwrt/
+  # ===============================================================
+  
+fi
 
 # 输出调试信息
 echo "$(date '+%Y-%m-%d %H:%M:%S') - 开始构建固件..."
