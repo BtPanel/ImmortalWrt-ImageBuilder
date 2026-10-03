@@ -53,15 +53,29 @@ else
       #    会导致 make 阶段报 "package mentioned in index not found"。
       #    这里从每个 apk 的 .PKGINFO 读出真实 name/version 后重命名。
       echo "📝 按 PKGINFO 规范化 apk 文件名..."
+      RENAMED=0
+      UNREADABLE=0
       for f in *.apk; do
-          INFO="$(tar -xOf "$f" .PKGINFO 2>/dev/null)"
+          # apk 是 签名段+控制段+数据段 拼接的 tar，必须 -i 才能跨过归档结束标记
+          INFO="$(tar -ixOf "$f" .PKGINFO 2>/dev/null)"
+          if [ -z "$INFO" ]; then
+              UNREADABLE=$((UNREADABLE + 1))
+              [ "$UNREADABLE" -le 5 ] && echo "   ⚠️ 读不到 .PKGINFO: $f"
+              continue
+          fi
           PNAME="$(printf '%s\n' "$INFO" | sed -n 's/^pkgname = //p' | head -1)"
           PVER="$(printf '%s\n' "$INFO" | sed -n 's/^pkgver = //p' | head -1)"
           if [ -n "$PNAME" ] && [ -n "$PVER" ] && [ "$f" != "$PNAME-$PVER.apk" ]; then
               echo "   $f -> $PNAME-$PVER.apk"
               mv -f "$f" "$PNAME-$PVER.apk"
+              RENAMED=$((RENAMED + 1))
           fi
       done
+      echo "   已重命名 $RENAMED 个，读不到 PKGINFO $UNREADABLE 个"
+      if [ "$UNREADABLE" -gt 0 ] && [ "$RENAMED" -eq 0 ]; then
+          echo "⚠️ 无法从 .PKGINFO 取到 name/version，文件名保持原样，"
+          echo "   若 make 阶段报 'package mentioned in index not found' 就是这个原因"
+      fi
 
       # 1. 定位工具链里的 apk / openssl（它们不在系统 PATH 中）
       APK_BIN="$IB_HOME/staging_dir/host/bin/apk"
