@@ -39,24 +39,76 @@ else
   ls -lah /home/build/immortalwrt/packages/
 
   # ============= 🔴 针对 25.12 apk 包管理器修复包索引 =============
+  # 注意：25.12 用的是 apk-tools 3.x，生成 apkv3 索引(packages.adb)的命令是 mkndx，
+  #       不是 2.x 的 `apk index`；且 apk 不在 PATH 里，必须用工具链里的全路径。
   echo "🔄 正在为 25.12 apk 本地仓库构建索引数据库..."
-  cd /home/build/immortalwrt/packages/
-  
-  # 1. 使用系统内置的 apk 工具扫描目录下的所有 apk，生成 packages.adb 二进制数据库文件
-  apk index -o packages.adb *.apk
-  
-  # 2. 对包索引进行数字签名（25.12 安全策略强制要求本地库必须具备合法签名才能读取）
-  if [ -f ../key-build ]; then
-      echo "✍️ 正在使用本地密钥为 packages.adb 签名..."
-      # 25.12 默认使用 key-build 密钥和 apk-sign 工具进行本地仓库链条签名
-      ../staging_dir/host/bin/apk-sign --key ../key-build --output packages.adb.signed packages.adb
-      # 将签名后的文件覆盖回 packages.adb
-      mv packages.adb.signed packages.adb
+  IB_HOME="/home/build/immortalwrt"
+  cd "$IB_HOME/packages/"
+
+  if ! ls *.apk >/dev/null 2>&1; then
+      echo "⚠️ packages/ 下没有 apk，跳过索引生成"
   else
-      echo "⚠️ 警告：未在根目录找到本地签名私钥 key-build，可能会影响打包！"
+      # 1. 定位工具链里的 apk / openssl（它们不在系统 PATH 中）
+      APK_BIN="$IB_HOME/staging_dir/host/bin/apk"
+      [ -x "$APK_BIN" ] || APK_BIN="$(command -v apk 2>/dev/null)"
+      OPENSSL_BIN="$IB_HOME/staging_dir/host/bin/openssl"
+      [ -x "$OPENSSL_BIN" ] || OPENSSL_BIN="$(command -v openssl 2>/dev/null)"
+      if [ -z "$APK_BIN" ]; then
+          echo "❌ 找不到 apk 工具，无法生成 packages.adb"
+          exit 1
+      fi
+      echo "🔧 使用 apk: $APK_BIN"
+
+      # 2. 准备本地签名密钥
+      #    imm25.config 里 CONFIG_SIGNATURE_CHECK=y，apk 只信任 $(TOPDIR)/keys 下的公钥，
+      #    未签名的 packages.adb 会被直接丢弃，表现就是第三方包全部 no such package。
+      #    这里照抄 IB 的 _check_keys 生成，保证后面 make image 复用同一份密钥。
+      KEY_DIR="$IB_HOME/keys"
+      KEY_SEC="$KEY_DIR/local-private-key.pem"
+      KEY_PUB="$KEY_DIR/local-public-key.pem"
+      mkdir -p "$KEY_DIR"
+      if [ -n "$OPENSSL_BIN" ] && { [ ! -s "$KEY_SEC" ] || [ ! -s "$KEY_PUB" ]; }; then
+          echo "🔑 生成本地签名密钥..."
+          "$OPENSSL_BIN" ecparam -name prime256v1 -genkey -noout -out "$KEY_SEC"
+          sed -i '1s/^/untrusted comment: Local build key\n/' "$KEY_SEC"
+          "$OPENSSL_BIN" ec -in "$KEY_SEC" -pubout > "$KEY_PUB"
+          sed -i '1s/^/untrusted comment: Local build key\n/' "$KEY_PUB"
+      fi
+
+      # 3. 生成索引（apk-tools 3 里没有 apk-sign，签名要用 mkndx --sign）
+      if [ -s "$KEY_SEC" ]; then
+          echo "✍️ 使用 $KEY_SEC 为 packages.adb 签名..."
+          MKNDX_CMD=("$APK_BIN" mkndx --root "$IB_HOME" --keys-dir "$KEY_DIR" \
+                     --sign "$KEY_SEC" --allow-untrusted --output packages.adb)
+      else
+          echo "⚠️ 无可用私钥，以未签名方式生成索引（SIGNATURE_CHECK=y 时可能被拒绝）"
+          MKNDX_CMD=("$APK_BIN" mkndx --root "$IB_HOME" --keys-dir "$KEY_DIR" \
+                     --allow-untrusted --output packages.adb)
+      fi
+
+      if ! "${MKNDX_CMD[@]}" *.apk; then
+          echo "⚠️ 完整参数失败，退回 ImageBuilder 的最小参数重试..."
+          if ! "$APK_BIN" mkndx --allow-untrusted --output packages.adb *.apk; then
+              echo "❌ packages.adb 生成失败，逐个排查可疑 apk："
+              for f in *.apk; do
+                  "$APK_BIN" mkndx --allow-untrusted --output /tmp/idx-probe.adb "$f" \
+                      >/dev/null 2>&1 || echo "   💥 可疑包: $f"
+              done
+              exit 1
+          fi
+      fi
+
+      # 4. 必须确认索引真的生成了（IB 自带的 package_index 会用 || true 静默吞掉失败）
+      ls -lah packages.adb
+      if [ ! -s packages.adb ]; then
+          echo "❌ packages.adb 未生成或为空，make image 必然报 no such package"
+          exit 1
+      fi
+      echo "✅ 本地仓库索引已生成，共 $(ls *.apk | wc -l) 个包"
   fi
+
   # 返回源码根目录，确保不影响后续的 make 流程
-  cd /home/build/immortalwrt/
+  cd "$IB_HOME/"
   # ===============================================================
   
 fi
