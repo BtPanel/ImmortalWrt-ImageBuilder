@@ -86,15 +86,28 @@ else
                      --allow-untrusted --output packages.adb)
       fi
 
+      BROKEN_DIR="$IB_HOME/packages-broken"
       if ! "${MKNDX_CMD[@]}" *.apk; then
-          echo "⚠️ 完整参数失败，退回 ImageBuilder 的最小参数重试..."
-          if ! "$APK_BIN" mkndx --allow-untrusted --output packages.adb *.apk; then
-              echo "❌ packages.adb 生成失败，逐个排查可疑 apk："
-              for f in *.apk; do
-                  "$APK_BIN" mkndx --allow-untrusted --output /tmp/idx-probe.adb "$f" \
-                      >/dev/null 2>&1 || echo "   💥 可疑包: $f"
-              done
-              exit 1
+          # mkndx 遇到格式错误的 apk 会整体中断（这也是 IB 自己建索引一直失败的原因），
+          # 所以逐个校验、把坏包隔离出去，再用剩下的包重试
+          echo "⚠️ 索引生成失败，逐个校验并隔离坏包..."
+          mkdir -p "$BROKEN_DIR"
+          for f in *.apk; do
+              if ! "$APK_BIN" mkndx --allow-untrusted --output /tmp/idx-probe.adb "$f" \
+                      >/dev/null 2>&1; then
+                  echo "   💥 坏包已隔离: $f"
+                  mv -f "$f" "$BROKEN_DIR/"
+              fi
+          done
+          rm -f /tmp/idx-probe.adb
+
+          echo "🔁 隔离后重试，剩余 $(ls *.apk 2>/dev/null | wc -l) 个包..."
+          if ! "${MKNDX_CMD[@]}" *.apk; then
+              echo "⚠️ 带签名失败，退回无签名最小参数..."
+              "$APK_BIN" mkndx --allow-untrusted --output packages.adb *.apk || {
+                  echo "❌ packages.adb 仍然无法生成"
+                  exit 1
+              }
           fi
       fi
 
@@ -105,6 +118,15 @@ else
           exit 1
       fi
       echo "✅ 本地仓库索引已生成，共 $(ls *.apk | wc -l) 个包"
+
+      # 5. 被隔离的坏包如果还在 PACKAGES 里，后面仍会 no such package，提前点名
+      if ls "$BROKEN_DIR"/*.apk >/dev/null 2>&1; then
+          echo "⚠️ 以下 apk 格式错误已被隔离到 packages-broken/："
+          for f in "$BROKEN_DIR"/*.apk; do
+              echo "   - $(basename "$f")"
+          done
+          echo "   若它们出现在 PACKAGES 中，请修复 apk 源或将其从 shell/apk-custom-packages.sh 移除"
+      fi
   fi
 
   # 返回源码根目录，确保不影响后续的 make 流程
